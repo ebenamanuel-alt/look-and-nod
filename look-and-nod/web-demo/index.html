@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Look and Nod</title>
+<meta name="description" content="Switch on a light by looking at it and nodding. Your webcam tracks your head, right in the browser. Nothing is recorded or uploaded.">
+<meta property="og:title" content="Look and Nod: switch on lights with a nod">
+<meta property="og:description" content="Look at a lamp and nod to switch it on. Shake to switch it off. Runs in your browser.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='46' fill='%23131829'/><circle cx='50' cy='46' r='20' fill='%23FFC46B'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --night: #0B0F1C;
+    --wall: #141A2C;
+    --wall-2: #1A2136;
+    --floor: #0F1322;
+    --line: rgba(237, 230, 218, .14);
+    --text: #EDE6DA;
+    --soft: #A9A496;
+    --warm: #FFC46B;
+    --warm-hot: #FFE2A8;
+    --focus: #7FD1FF;
+    --display: "Fraunces", Georgia, serif;
+    --body: "Figtree", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --room-light: 0;   /* 0 to 1, how lit the room is overall */
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--night); color: var(--text); font-family: var(--body);
+    -webkit-font-smoothing: antialiased; overflow: hidden;
+  }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  [hidden] { display: none !important; }
+  :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; border-radius: 10px; }
+
+  /* ---------- The room ---------- */
+  .room { position: fixed; inset: 0; overflow: hidden; }
+  .wall { position: absolute; inset: 0 0 22% 0; background: linear-gradient(180deg, var(--wall) 0%, var(--wall-2) 100%); }
+  .floor { position: absolute; left: 0; right: 0; bottom: 0; height: 22%; background: var(--floor); border-top: 1px solid var(--line); }
+  .ambient {
+    position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(120% 90% at 50% 40%, rgba(255, 196, 107, .22), rgba(255, 196, 107, 0) 70%);
+    opacity: var(--room-light); transition: opacity .5s ease;
+  }
+  .window {
+    position: absolute; top: 12%; left: 50%; transform: translateX(-50%);
+    width: min(22vw, 220px); aspect-ratio: 3 / 4; border: 6px solid #22293F; border-radius: 6px;
+    background: linear-gradient(180deg, #121A33, #1C2547); opacity: .55;
+  }
+  .window::before, .window::after { content: ""; position: absolute; background: #22293F; }
+  .window::before { left: 50%; top: 0; bottom: 0; width: 6px; transform: translateX(-50%); }
+  .window::after { top: 50%; left: 0; right: 0; height: 6px; transform: translateY(-50%); }
+  .moon { position: absolute; top: 18%; right: 22%; width: 22%; aspect-ratio: 1; border-radius: 50%; background: #E9E2CF; box-shadow: 0 0 20px rgba(233, 226, 207, .4); }
+
+  .lamp {
+    position: absolute; bottom: 22%; transform: translateX(-50%);
+    display: flex; flex-direction: column; align-items: center;
+    background: none; border: 0; padding: 0;
+  }
+  .lamp { --s: 1; }
+  .lamp svg { display: block; overflow: visible; width: calc(var(--w) * var(--s)); height: auto; }
+  .glow, .ring { top: calc(var(--by) * var(--s)); }
+  .lamp .shade { fill: #2A3150; stroke: #3A4366; stroke-width: 2; transition: fill .35s, stroke .35s; }
+  .lamp .bulb { fill: #3A4366; transition: fill .3s; }
+  .lamp .metal { stroke: #3A4366; stroke-width: 6; stroke-linecap: round; fill: none; }
+  .lamp .base { fill: #2A3150; }
+  .lamp.on .shade { fill: #F6C779; stroke: #FFE2A8; }
+  .lamp.on .bulb { fill: var(--warm-hot); }
+  .glow {
+    position: absolute; left: 50%; width: 640px; height: 640px; transform: translate(-50%, -50%);
+    border-radius: 50%; pointer-events: none; opacity: 0;
+    background: radial-gradient(circle, rgba(255, 214, 140, .75) 0%, rgba(255, 180, 90, .28) 28%, rgba(255, 160, 70, 0) 62%);
+    transition: opacity .35s ease;
+    mix-blend-mode: screen;
+  }
+  .lamp.on .glow { opacity: var(--level, 1); }
+  .lamp .name {
+    margin-top: 12px; font-weight: 600; font-size: 15px; color: var(--soft);
+    padding: 4px 12px; border-radius: 999px; border: 1px solid transparent; transition: color .2s, border-color .2s, background .2s;
+  }
+  .lamp.focus .name { color: var(--night); background: var(--focus); }
+  .lamp.focus svg { filter: drop-shadow(0 0 12px rgba(127, 209, 255, .6)); }
+  .ring {
+    position: absolute; left: 50%; width: 120px; height: 120px; transform: translate(-50%, -50%) scale(.6);
+    border-radius: 50%; border: 3px solid var(--focus); opacity: 0; pointer-events: none;
+  }
+  .ring.go { animation: ring .55s ease-out; }
+  @keyframes ring { 0% { opacity: .9; transform: translate(-50%, -50%) scale(.6); } 100% { opacity: 0; transform: translate(-50%, -50%) scale(1.6); } }
+
+  /* Where your head is pointing */
+  .gaze {
+    position: absolute; top: 46%; left: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px;
+    border-radius: 50%; border: 3px solid var(--focus); background: rgba(127, 209, 255, .25);
+    box-shadow: 0 0 18px rgba(127, 209, 255, .5); pointer-events: none;
+    transition: left .08s linear, top .08s linear, opacity .3s;
+  }
+  .gaze::after { content: ""; position: absolute; inset: 5px; border-radius: 50%; background: var(--focus); }
+
+  /* ---------- HUD ---------- */
+  .hud { position: fixed; left: 0; right: 0; top: 0; display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding: 20px 24px; z-index: 5; }
+  .title { font-family: var(--display); font-weight: 700; font-size: 32px; line-height: 1; margin: 0; letter-spacing: -.01em; }
+  .title small { display: block; font-family: var(--body); font-weight: 500; font-size: 15px; color: var(--soft); margin-top: 6px; letter-spacing: 0; }
+  .tools { display: flex; gap: 8px; }
+  .chip { background: rgba(11, 15, 28, .7); border: 1px solid var(--line); border-radius: 999px; padding: 8px 14px; font-weight: 600; font-size: 14px; white-space: nowrap; backdrop-filter: blur(6px); }
+  .chip:hover { border-color: rgba(237, 230, 218, .4); }
+
+  .caption {
+    position: fixed; left: 50%; bottom: calc(22% / 2); transform: translate(-50%, 50%); z-index: 5;
+    text-align: center; display: flex; flex-direction: column; align-items: center; gap: 10px; width: min(92vw, 640px);
+  }
+  .say { font-family: var(--display); font-size: clamp(26px, 4vw, 40px); font-weight: 700; margin: 0; line-height: 1.1; min-height: 1.1em; }
+  .say.pop { animation: pop .35s cubic-bezier(.2, 1.5, .4, 1); }
+  @keyframes pop { from { transform: scale(1.3); opacity: 0; } }
+  .hint { margin: 0; color: var(--soft); font-size: 16px; line-height: 1.4; }
+  .kbd { display: inline-grid; place-items: center; min-width: 1.7em; height: 1.7em; padding: 0 .35em; border-radius: 6px; background: var(--text); color: var(--night); font-weight: 700; font-size: .85em; }
+
+  .cam {
+    position: fixed; right: 20px; bottom: 20px; z-index: 6; width: 168px; aspect-ratio: 4 / 3;
+    border-radius: 14px; overflow: hidden; border: 1px solid var(--line); background: #000;
+  }
+  .cam video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); opacity: .85; }
+  .cam .meter { position: absolute; left: 8px; right: 8px; bottom: 8px; height: 4px; border-radius: 4px; background: rgba(237, 230, 218, .2); }
+  .cam .meter i { position: absolute; top: -3px; width: 10px; height: 10px; margin-left: -5px; border-radius: 50%; background: var(--focus); left: 50%; }
+
+  /* ---------- Start sheet ---------- */
+  .sheet-wrap { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; background: rgba(6, 8, 15, .66); backdrop-filter: blur(4px); }
+  .sheet { width: min(560px, 100%); background: #141A2C; border: 1px solid var(--line); border-radius: 22px; padding: 30px; box-shadow: 0 30px 80px rgba(0, 0, 0, .5); }
+  .sheet h1 { font-family: var(--display); font-size: clamp(38px, 7vw, 54px); line-height: 1; margin: 0 0 12px; }
+  .sheet p { margin: 0 0 12px; font-size: 17px; line-height: 1.5; color: #D6D0C4; }
+  .moves { list-style: none; padding: 0; margin: 18px 0 22px; display: grid; gap: 10px; }
+  .moves li { display: flex; gap: 14px; align-items: center; font-size: 16px; }
+  .moves .ic { flex: none; width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: #1E2640; font-size: 20px; }
+  .btn { background: var(--warm); color: #1A1206; border: 0; border-radius: 999px; padding: 14px 24px; font-weight: 700; font-size: 17px; box-shadow: 0 0 30px rgba(255, 196, 107, .35); }
+  .btn:active { transform: translateY(1px); }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .link { background: none; border: 0; padding: 0; color: var(--text); text-decoration: underline; text-underline-offset: 3px; font-weight: 600; }
+  .fine { font-size: 14px !important; color: var(--soft) !important; margin-top: 16px !important; }
+
+  @media (max-width: 700px) {
+    .title { font-size: 24px; }
+    .title small { display: none; }
+    .lamp { --s: .62; }
+    .glow { width: 420px; height: 420px; }
+    .cam { width: 110px; right: 12px; bottom: 12px; }
+    .hint { font-size: 14px; }
+    .window { width: 30vw; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+  }
+</style>
+</head>
+<body>
+<div class="room" aria-hidden="false">
+  <div class="wall"><div class="window"><div class="moon"></div></div></div>
+  <div class="floor"></div>
+  <div class="ambient" id="ambient"></div>
+
+  <!-- Floor lamp -->
+  <button class="lamp" id="lamp-floor" data-x="20" aria-label="Floor lamp" style="left:20%; --w:120px; --by:86px">
+    <span class="glow"></span>
+    <span class="ring"></span>
+    <svg viewBox="0 0 120 320" aria-hidden="true">
+      <path class="shade" d="M30 20 L90 20 L108 90 L12 90 Z"/>
+      <circle class="bulb" cx="60" cy="86" r="10"/>
+      <line class="metal" x1="60" y1="90" x2="60" y2="306"/>
+      <ellipse class="base" cx="60" cy="312" rx="34" ry="8"/>
+    </svg>
+    <span class="name">Floor lamp</span>
+  </button>
+
+  <!-- Pendant -->
+  <button class="lamp" id="lamp-pendant" data-x="50" aria-label="Pendant light" style="left:50%; bottom:auto; top:0; --w:160px; --by:302px">
+    <span class="glow"></span>
+    <span class="ring"></span>
+    <svg viewBox="0 0 160 320" aria-hidden="true">
+      <line class="metal" x1="80" y1="0" x2="80" y2="240" style="stroke-width:3"/>
+      <path class="shade" d="M80 236 C38 236 14 270 10 300 L150 300 C146 270 122 236 80 236 Z"/>
+      <circle class="bulb" cx="80" cy="302" r="12"/>
+    </svg>
+    <span class="name">Pendant</span>
+  </button>
+
+  <!-- Desk lamp -->
+  <button class="lamp" id="lamp-desk" data-x="80" aria-label="Desk lamp" style="left:80%; --w:200px; --by:74px">
+    <span class="glow"></span>
+    <span class="ring"></span>
+    <svg viewBox="0 0 200 240" aria-hidden="true">
+      <rect class="base" x="0" y="150" width="200" height="12" rx="3"/>
+      <line class="metal" x1="30" y1="162" x2="30" y2="236"/>
+      <line class="metal" x1="170" y1="162" x2="170" y2="236"/>
+      <ellipse class="base" cx="100" cy="146" rx="26" ry="6"/>
+      <polyline class="metal" points="100,144 74,92 112,52" style="stroke-width:5"/>
+      <path class="shade" d="M104 40 L150 22 L168 66 L126 78 Z"/>
+      <circle class="bulb" cx="140" cy="74" r="9"/>
+    </svg>
+    <span class="name">Desk lamp</span>
+  </button>
+
+  <div class="gaze" id="gaze" hidden></div>
+</div>
+
+<header class="hud">
+  <h1 class="title">Look and Nod <small>Look at a light. Nod to switch it on.</small></h1>
+  <div class="tools">
+    <button class="chip" id="recentreBtn" hidden>Recentre</button>
+    <button class="chip" id="soundBtn" aria-pressed="true">Sound <span id="soundState">on</span></button>
+    <button class="chip" id="helpBtn">How it works</button>
+  </div>
+</header>
+
+<div class="caption">
+  <p class="say" id="say" aria-live="assertive"></p>
+  <p class="hint" id="hint" aria-live="polite">Start the camera to begin.</p>
+</div>
+
+<div class="cam" id="cam" hidden>
+  <video id="video" playsinline muted></video>
+  <div class="meter"><i id="meterDot"></i></div>
+</div>
+
+<div class="sheet-wrap" id="intro" role="dialog" aria-modal="true" aria-labelledby="introTitle">
+  <div class="sheet">
+    <h1 id="introTitle">Look and Nod</h1>
+    <p>Control the lights in this room with your head. Your webcam follows where you're pointing.</p>
+    <ul class="moves">
+      <li><span class="ic" aria-hidden="true">👀</span><span><b>Look</b> at a lamp by turning your head towards it.</span></li>
+      <li><span class="ic" aria-hidden="true">↕️</span><span><b>Nod</b> to switch it on.</span></li>
+      <li><span class="ic" aria-hidden="true">↔️</span><span><b>Shake</b> your head to switch it off.</span></li>
+      <li><span class="ic" aria-hidden="true">⌨️</span><span><span class="kbd">↑</span> <span class="kbd">↓</span> make the lamp you're looking at brighter or dimmer.</span></li>
+    </ul>
+    <div class="row">
+      <button class="btn" id="startBtn">Start camera</button>
+      <button class="link" id="keysBtn">No camera? Use the keyboard</button>
+    </div>
+    <p class="fine">Your camera stays on your device. Nothing is recorded or uploaded. I built the real version with AirPods head tracking and a smart bulb; this is the version anyone can try.</p>
+  </div>
+</div>
+
+<script type="module">
+/* ---------- Settings ---------- */
+const DEG_PER_SCREEN = 22;       // head turn (degrees) to reach a side lamp
+const FOCUS_RANGE = 14;          // how close (% of screen width) the gaze must be to a lamp
+const MP = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+const MODEL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+
+const $ = (id) => document.getElementById(id);
+const lamps = [...document.querySelectorAll(".lamp")].map((el) => ({
+  el, id: el.id, x: Number(el.dataset.x), name: el.querySelector(".name").textContent, on: false, level: 1,
+}));
+
+const state = { mode: null, sound: true, focus: null, last: null, base: null, calibrating: 0, calib: [], flip: 1, flipVotes: 0 };
+
+/* ---------- Sound ---------- */
+let ac;
+function tone(f, ms, type = "sine", vol = .08) {
+  if (!state.sound) return;
+  try {
+    ac = ac || new (window.AudioContext || window.webkitAudioContext)();
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type; o.frequency.value = f;
+    g.gain.setValueAtTime(vol, ac.currentTime); g.gain.exponentialRampToValueAtTime(.0001, ac.currentTime + ms / 1000);
+    o.connect(g).connect(ac.destination); o.start(); o.stop(ac.currentTime + ms / 1000);
+  } catch { /* optional */ }
+}
+const sfx = { on: () => { tone(660, 90); setTimeout(() => tone(990, 120), 70); }, off: () => { tone(520, 90); setTimeout(() => tone(330, 140), 70); }, tick: () => tone(1400, 25, "square", .02) };
+
+/* ---------- Room ---------- */
+function say(text) { const s = $("say"); s.classList.remove("pop"); void s.offsetWidth; s.textContent = text; s.classList.add("pop"); }
+function hint(html) { $("hint").innerHTML = html; }
+function render() {
+  let light = 0;
+  for (const l of lamps) {
+    l.el.classList.toggle("on", l.on);
+    l.el.classList.toggle("focus", state.focus === l);
+    l.el.style.setProperty("--level", (0.25 + 0.75 * l.level).toFixed(2));
+    l.el.setAttribute("aria-pressed", String(l.on));
+    if (l.on) light += l.level;
+  }
+  document.documentElement.style.setProperty("--room-light", Math.min(1, light / 2).toFixed(2));
+}
+function setFocus(l) {
+  if (state.focus !== l) {
+    state.focus = l;
+    if (l) { state.last = l; sfx.tick(); }
+    render();
+  }
+}
+function ring(l) { const r = l.el.querySelector(".ring"); r.classList.remove("go"); void r.offsetWidth; r.classList.add("go"); }
+function switchLamp(l, on, how) {
+  if (!l) { say(how === "nod" ? "Nod" : "Shake"); hint("You weren't looking at a lamp. Point your nose at one first."); return; }
+  l.on = on; ring(l); render();
+  on ? sfx.on() : sfx.off();
+  say(`${l.name} ${on ? "on" : "off"}`);
+  hint(on ? "Shake your head to switch it off, or press ↑ ↓ to change brightness." : "Look at another lamp, or nod to switch this one back on.");
+}
+function changeLevel(dir) {
+  const l = state.focus || state.last;
+  if (!l) return;
+  if (!l.on) { l.on = true; }
+  l.level = Math.max(.1, Math.min(1, Math.round((l.level + dir * .1) * 10) / 10));
+  render();
+  say(`${l.name} ${Math.round(l.level * 100)}%`);
+}
+
+/* ---------- Gesture detection (same logic as the AirPods app) ---------- */
+const wrap = (d) => ((d + 180) % 360 + 360) % 360 - 180;
+const detector = {
+  samples: [], cool: 0, window: 1.0, cooldown: 1.4, h: 6,
+  reversals(v) {
+    let d = 0, e = v[0], r = 0;
+    for (const x of v.slice(1)) {
+      if (d === 0) { if (x - e > this.h) { d = 1; e = x; } else if (e - x > this.h) { d = -1; e = x; } }
+      else if (d === 1) { if (x > e) e = x; else if (e - x > this.h) { d = -1; e = x; r++; } }
+      else { if (x < e) e = x; else if (x - e > this.h) { d = 1; e = x; r++; } }
+    }
+    return r;
+  },
+  feed(t, pitch, yaw) {
+    this.samples.push({ t, pitch, yaw });
+    this.samples = this.samples.filter((s) => t - s.t <= this.window);
+    const S = this.samples;
+    if (t < this.cool || S.length < 8 || t - S[0].t < .25) return null;
+    const p0 = S[0].pitch, y0 = S[0].yaw;
+    const ps = S.map((s) => s.pitch), ys = S.map((s) => wrap(s.yaw - y0));
+    const pR = Math.max(...ps) - Math.min(...ps), yR = Math.max(...ys) - Math.min(...ys);
+    const dip = Math.max(...ps.map((p) => Math.abs(p - p0)));
+    let g = null;
+    if (this.reversals(ps) >= 1 && dip >= 10 && Math.abs(ps.at(-1) - p0) <= 5 && yR <= 10) g = "nod";
+    else if (this.reversals(ys) >= 2 && yR >= 16 && pR <= 12 && Math.abs(ys.at(-1)) <= 8) g = "shake";
+    if (!g) return null;
+    this.cool = t + this.cooldown; this.samples = [];
+    return { gesture: g, heading: y0 };
+  },
+};
+
+function lampAtYaw(yaw) {
+  const x = 50 + (yaw / DEG_PER_SCREEN) * 30;
+  let best = null, dist = Infinity;
+  for (const l of lamps) { const d = Math.abs(l.x - x); if (d < dist) { dist = d; best = l; } }
+  return { lamp: dist <= FOCUS_RANGE ? best : null, x };
+}
+
+// One head pose sample, in degrees. yaw: negative = towards the left of the screen.
+function onPose(t, yaw, pitch) {
+  if (state.calibrating) {
+    state.calib.push({ yaw, pitch });
+    if (t >= state.calibrating) {
+      const n = state.calib.length || 1;
+      state.base = { yaw: state.calib.reduce((a, s) => a + s.yaw, 0) / n, pitch: state.calib.reduce((a, s) => a + s.pitch, 0) / n };
+      state.calibrating = 0; state.calib = [];
+      say("Ready");
+      hint("Turn your head towards a lamp, then <b>nod</b> to switch it on.");
+      $("gaze").hidden = false;
+    }
+    return;
+  }
+  if (!state.base) return;
+  const y = wrap(yaw - state.base.yaw), p = pitch - state.base.pitch;
+  const { lamp, x } = lampAtYaw(y);
+  const gz = $("gaze");
+  gz.style.left = `${Math.max(3, Math.min(97, x))}%`;
+  gz.style.top = `${Math.max(20, Math.min(70, 46 + p * .8))}%`;
+  $("meterDot").style.left = `${Math.max(0, Math.min(100, x))}%`;
+  setFocus(lamp);
+  const g = detector.feed(t, p, y);
+  if (g) switchLamp(lampAtYaw(g.heading).lamp, g.gesture === "nod", g.gesture);
+}
+window.__lookAndNodPose = onPose; // used by automated tests
+
+function recentre(now = performance.now() / 1000) {
+  state.calibrating = now + 1.2; state.calib = []; state.base = null;
+  $("gaze").hidden = true;
+  say("Look at the pendant");
+  hint("Face the middle of the screen and keep still for a moment.");
+}
+
+/* ---------- Camera and face tracking ---------- */
+let landmarker = null, lastT = -1;
+const video = $("video");
+
+async function startCamera() {
+  $("intro").hidden = true;
+  state.mode = "camera";
+  say("One moment");
+  hint("Starting your camera and loading the face tracker.");
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+    video.srcObject = stream; await video.play();
+    const vision = await import(`${MP}/vision_bundle.mjs`);
+    const files = await vision.FilesetResolver.forVisionTasks(`${MP}/wasm`);
+    const opts = (delegate) => ({
+      baseOptions: { modelAssetPath: MODEL, delegate }, runningMode: "VIDEO", numFaces: 1,
+      outputFacialTransformationMatrixes: true,
+    });
+    try { landmarker = await vision.FaceLandmarker.createFromOptions(files, opts("GPU")); }
+    catch { landmarker = await vision.FaceLandmarker.createFromOptions(files, opts("CPU")); }
+    $("cam").hidden = false; $("recentreBtn").hidden = false;
+    recentre();
+    requestAnimationFrame(loop);
+  } catch (err) {
+    console.error(err);
+    const blocked = err && (err.name === "NotAllowedError" || err.name === "SecurityError");
+    state.mode = "keys";
+    useKeys();
+    say("No camera");
+    hint(blocked
+      ? "Camera access was blocked. Allow it from the address bar and reload, or use the keyboard: <span class=\"kbd\">←</span> <span class=\"kbd\">→</span> to look, <span class=\"kbd\">Enter</span> to switch."
+      : "The face tracker didn't load. Use <span class=\"kbd\">←</span> <span class=\"kbd\">→</span> to look and <span class=\"kbd\">Enter</span> to switch.");
+  }
+}
+
+// Turn the face's 3D rotation into yaw and pitch in degrees
+function poseFrom(result) {
+  const m = result.facialTransformationMatrixes?.[0]?.data;
+  const lm = result.faceLandmarks?.[0];
+  if (!m || !lm) return null;
+  // Column major: the third column is where the face is pointing
+  const fx = m[8], fy = m[9], fz = m[10];
+  let yaw = Math.atan2(fx, fz) * 180 / Math.PI;
+  const pitch = Math.atan2(-fy, Math.hypot(fx, fz)) * 180 / Math.PI;
+  // Make sure turning to your left moves the gaze left on the mirrored screen.
+  // The nose tip sits off centre towards the way you're turning, so it tells us the true direction.
+  const nose = lm[1], l = lm[234], r = lm[454];
+  const offset = (nose.x - (l.x + r.x) / 2) / Math.max(.01, Math.abs(r.x - l.x));
+  const screenSide = -offset; // mirrored view
+  if (Math.abs(screenSide) > .12 && Math.abs(yaw) > 8) {
+    state.flipVotes += Math.sign(screenSide) === Math.sign(yaw * state.flip) ? 1 : -1;
+    if (state.flipVotes < -8) { state.flip *= -1; state.flipVotes = 0; }
+    if (state.flipVotes > 20) state.flipVotes = 20;
+  }
+  yaw *= state.flip;
+  return { yaw, pitch };
+}
+
+function loop() {
+  if (video.readyState >= 2 && video.currentTime !== lastT) {
+    lastT = video.currentTime;
+    const now = performance.now();
+    const res = landmarker.detectForVideo(video, now);
+    const pose = poseFrom(res);
+    if (pose) onPose(now / 1000, pose.yaw, pose.pitch);
+    else if (state.base) { setFocus(null); hint("I can't see your face. Sit facing the camera."); }
+  }
+  requestAnimationFrame(loop);
+}
+
+/* ---------- Keyboard and mouse fallback ---------- */
+function useKeys() {
+  $("intro").hidden = true;
+  state.mode = state.mode || "keys";
+  if (!state.focus) setFocus(lamps[1]);
+  say("Keyboard mode");
+  hint('<span class="kbd">←</span> <span class="kbd">→</span> to look, <span class="kbd">Enter</span> to switch, <span class="kbd">↑</span> <span class="kbd">↓</span> for brightness. Or click a lamp.');
+}
+lamps.forEach((l) => l.el.addEventListener("click", () => { setFocus(l); switchLamp(l, !l.on, l.on ? "shake" : "nod"); }));
+
+document.addEventListener("keydown", (e) => {
+  if (!$("intro").hidden || e.metaKey || e.ctrlKey || e.altKey) return;
+  const i = lamps.indexOf(state.focus);
+  if (e.key === "ArrowUp") { e.preventDefault(); changeLevel(1); }
+  else if (e.key === "ArrowDown") { e.preventDefault(); changeLevel(-1); }
+  else if (state.mode === "keys" && e.key === "ArrowLeft") { e.preventDefault(); setFocus(lamps[Math.max(0, (i < 0 ? 1 : i) - 1)]); }
+  else if (state.mode === "keys" && e.key === "ArrowRight") { e.preventDefault(); setFocus(lamps[Math.min(lamps.length - 1, (i < 0 ? 1 : i) + 1)]); }
+  else if ((e.key === "Enter" || e.key === " ") && state.focus && document.activeElement?.tagName !== "BUTTON") { e.preventDefault(); switchLamp(state.focus, !state.focus.on, state.focus.on ? "shake" : "nod"); }
+  else if (e.key.toLowerCase() === "r" && state.mode === "camera") recentre();
+  else if (e.key.toLowerCase() === "m") toggleSound();
+});
+
+function toggleSound() { state.sound = !state.sound; $("soundState").textContent = state.sound ? "on" : "off"; $("soundBtn").setAttribute("aria-pressed", String(state.sound)); }
+$("startBtn").addEventListener("click", startCamera);
+$("keysBtn").addEventListener("click", useKeys);
+$("recentreBtn").addEventListener("click", () => recentre());
+$("soundBtn").addEventListener("click", toggleSound);
+$("helpBtn").addEventListener("click", () => { $("intro").hidden = false; $("startBtn").focus(); });
+render();
+</script>
+</body>
+</html>
