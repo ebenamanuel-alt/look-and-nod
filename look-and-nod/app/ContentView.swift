@@ -584,6 +584,7 @@ final class LookAndNod: NSObject, ObservableObject, CMHeadphoneMotionManagerDele
     private var lastPredictedStep: [String: Int] = [:]
     private let volumeWatcher = VolumeWatcher()
     private var keyMonitors: [Any] = []
+    private var mouse: MouseControl?
     let stepSize = 10
 
     func start() {
@@ -604,12 +605,13 @@ final class LookAndNod: NSObject, ObservableObject, CMHeadphoneMotionManagerDele
             MainActor.assumeIsolated { self.handle(data) }
         }
         startKeyMonitoring()
+        startMouse()
         HUD.shared.enabled = showPopUps
         volumeWatcher.onSwipe = { [weak self] direction in self?.keyStep(direction, from: .airpods) }
         volumeWatcher.start()
         refreshDevices()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshDevices(); self?.installKeyTap() }
+            Task { @MainActor in self?.refreshDevices(); self?.installKeyTap(); self?.mouse?.install() }
         }
     }
 
@@ -742,6 +744,59 @@ final class LookAndNod: NSObject, ObservableObject, CMHeadphoneMotionManagerDele
         }
         activity.insert(a, at: 0)
         if activity.count > 40 { activity.removeLast() }
+    }
+
+    // MARK: Magic Mouse (hold ⌃ ⌥, then slide, swipe or click)
+
+    private func startMouse() {
+        let m = MouseControl(
+            target: { [weak self] in self?.facing.map { (device: $0.device, label: $0.label) } },
+            report: { [weak self] event in self?.mouseEvent(event) },
+            levelChanged: { [weak self] name, level in
+                self?.levels[name] = level
+                self?.shownLevel[name] = level
+            },
+            online: { [weak self] ok in
+                if self?.bridgeOnline != ok { self?.bridgeOnline = ok }
+            }
+        )
+        m.install()
+        mouse = m
+    }
+
+    private func mouseEvent(_ event: MouseEvent) {
+        switch event {
+        case let .brightness(label, level, up):
+            message = "\(label) brightness \(level)%"
+            HUD.shared.show(HUDInfo(
+                symbol: up ? "sun.max.fill" : "sun.min.fill",
+                title: label, detail: "Brightness", level: level,
+                source: "Magic Mouse", sourceSymbol: "magicmouse",
+                lit: true))
+            log(Activity(symbol: "magicmouse", title: "\(label) \(level)%", detail: "Magic Mouse slide",
+                         key: "mouse-brightness-\(label)"))
+        case let .colour(label, name, next):
+            message = "\(label): \(name)"
+            HUD.shared.show(HUDInfo(
+                symbol: "paintpalette.fill",
+                title: label, detail: name, level: nil,
+                source: next ? "Magic Mouse swipe ›" : "‹ Magic Mouse swipe", sourceSymbol: "magicmouse",
+                lit: true))
+            log(Activity(symbol: "paintpalette", title: "\(label): \(name)", detail: "Magic Mouse swipe",
+                         key: "mouse-colour-\(label)"))
+        case let .toggled(label, on):
+            message = "\(label) \(on ? "on" : "off")."
+            HUD.shared.show(HUDInfo(
+                symbol: on ? "lightbulb.max.fill" : "lightbulb.slash",
+                title: label, detail: on ? "On" : "Off", level: nil,
+                source: "Magic Mouse click", sourceSymbol: "cursorarrow.click",
+                lit: on))
+            log(Activity(symbol: on ? "lightbulb.max" : "lightbulb.slash", title: "\(label) \(on ? "on" : "off")",
+                         detail: "Magic Mouse click"))
+        case let .problem(text):
+            message = text
+            log(Activity(symbol: "exclamationmark.triangle", title: "Magic Mouse", detail: text, ok: false))
+        }
     }
 
     private func gesturePopUp(_ g: GestureDetector.Gesture, title: String, detail: String, worked: Bool) {
