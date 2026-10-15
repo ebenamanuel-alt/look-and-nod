@@ -27,7 +27,7 @@ enum MouseTap {
 enum MouseEvent {
     case brightness(label: String, level: Int, up: Bool)
     case colour(label: String, name: String, next: Bool)
-    case toggled(label: String, on: Bool)
+    case toggled(device: String, label: String, on: Bool)
     case problem(String)
 }
 
@@ -43,11 +43,14 @@ private struct MouseReply: Decodable {
 
 @MainActor
 final class MouseControl {
-    // Tuning. Change these if it feels too fast, too slow or backwards.
-    let pointsPerPercent = 6.0   // smaller number = brightness changes faster
-    let swipeDistance = 45.0     // how far a sideways swipe must go to change colour
-    let flipVertical = false     // true if sliding up makes it dimmer
-    let flipSwipe = false        // true if swiping right goes to the previous colour
+    // Tuning. The app's settings panel changes the first two.
+    var pointsPerPercent = 6.0   // smaller number = brightness changes faster
+    var swipeDistance = 60.0     // how far a sideways swipe must go to change colour
+    var flipVertical = false     // true if sliding up makes it dimmer
+    var flipSwipe = false        // true if swiping right goes to the previous colour
+
+    /// When set, colour swipes are handed to the app, which also changes the colour for a head tilt.
+    var colourSwipe: ((String) -> Void)?
 
     private let bridge = URL(string: "http://127.0.0.1:8765")!
     private let target: () -> (device: String, label: String)?
@@ -58,7 +61,9 @@ final class MouseControl {
     private var verticalPoints = 0.0
     private var swipePoints = 0.0
     private var lastScroll = Date.distantPast
-    private var swipeLockedUntil = Date.distantPast
+    private var swipeUsed = false
+    private enum Axis { case sideways, upDown }
+    private var gestureAxis: Axis?
     private var pendingStep = 0
     private var stepping = false
     private var changingColour = false
@@ -135,30 +140,49 @@ final class MouseControl {
         let dy = flipVertical ? -rawY : rawY
         let now = Date()
 
-        // A pause starts a fresh gesture
-        if now.timeIntervalSince(lastScroll) > 0.3 { verticalPoints = 0; swipePoints = 0 }
+        // A short pause means a new gesture has started
+        if now.timeIntervalSince(lastScroll) > 0.25 {
+            verticalPoints = 0
+            swipePoints = 0
+            swipeUsed = false
+            gestureAxis = nil
+        }
         lastScroll = now
-        guard now >= swipeLockedUntil else { return }
 
-        if abs(dx) > abs(dy) * 1.5 {
-            // Sideways swipe: one colour per swipe
+        // Decide once per gesture whether it's sideways (colour) or up and down (brightness),
+        // so a slightly diagonal slide can't do both.
+        if gestureAxis == nil {
             swipePoints += dx
-            if abs(swipePoints) >= swipeDistance {
-                let direction = swipePoints > 0 ? "next" : "prev"
-                swipePoints = 0
-                verticalPoints = 0
-                swipeLockedUntil = now.addingTimeInterval(0.45)
-                changeColour(direction)
-            }
-        } else if dy != 0 {
-            // Up or down slide: brightness, includes the momentum glide after a flick
             verticalPoints += dy
+            if abs(swipePoints) >= 12, abs(swipePoints) > abs(verticalPoints) * 1.5 {
+                gestureAxis = .sideways
+            } else if abs(verticalPoints) >= 6 {
+                gestureAxis = .upDown
+                swipePoints = 0
+            } else {
+                return
+            }
+        } else if gestureAxis == .sideways {
+            swipePoints += dx
+        } else {
+            verticalPoints += dy
+        }
+
+        switch gestureAxis {
+        case .sideways:
+            // One colour per swipe. The glide after the swipe is ignored until your finger stops.
+            guard !swipeUsed, abs(swipePoints) >= swipeDistance else { return }
+            swipeUsed = true
+            changeColour(swipePoints > 0 ? "next" : "prev")
+        case .upDown:
             let whole = Int(verticalPoints / pointsPerPercent)
             if whole != 0 {
                 verticalPoints -= Double(whole) * pointsPerPercent
                 pendingStep += whole
                 pumpBrightness()
             }
+        case nil:
+            break
         }
     }
 
@@ -170,11 +194,12 @@ final class MouseControl {
             guard let self else { return }
             self.toggling = false
             guard let reply else { return }
-            self.report(.toggled(label: label, on: reply.action != "off"))
+            self.report(.toggled(device: device, label: label, on: reply.action != "off"))
         }
     }
 
     private func changeColour(_ direction: String) {
+        if let colourSwipe { colourSwipe(direction); return }
         guard !changingColour else { return }
         changingColour = true
         let (device, label) = destination()

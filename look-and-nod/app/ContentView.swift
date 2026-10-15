@@ -16,11 +16,23 @@ import AudioToolbox
 struct BridgeDevice: Decodable, Identifiable {
     let name: String
     let label: String
+    let colour: String?     // the bulb's current colour as #RRGGBB, when the bridge knows it
     var id: String { name }
 }
 
 private struct DevicesResponse: Decodable { let devices: [BridgeDevice] }
 private struct LevelResponse: Decodable { let level: Int }
+private struct ColourResponse: Decodable {
+    let preset: String?
+    let colour: String?
+    let colours: [String: String]?
+}
+
+/// Turns "#FFAA00" into a colour. Falls back to the usual lamp yellow.
+func lampTint(_ hex: String?) -> Color {
+    guard let hex, hex.count == 7, hex.hasPrefix("#"), let v = UInt32(hex.dropFirst(), radix: 16) else { return .yellow }
+    return Color(red: Double((v >> 16) & 0xFF) / 255, green: Double((v >> 8) & 0xFF) / 255, blue: Double(v & 0xFF) / 255)
+}
 
 struct Target: Codable, Identifiable {
     let device: String      // name used by the bridge, e.g. "bulb-rgbw"
@@ -69,9 +81,12 @@ struct GestureDetector {
     private var samples: [(t: Double, pitch: Double, yaw: Double)] = []
     private var cooldownUntil = 0.0
 
+    // Sensitivity. Smaller numbers = a smaller movement counts.
+    var nodDegrees = 5.0      // how far your head must dip for a nod (the settings panel changes this)
+    var shakeDegrees = 8.0    // how wide a shake must be, side to side (the settings panel changes this)
+    let hysteresis = 3.0      // ignores wobbles smaller than this (was 6)
     let window = 1.0
-    let cooldown = 1.4
-    let hysteresis = 6.0
+    let cooldown = 1.0
 
     /// Returns the gesture and the heading the user was facing when it started.
     mutating func feed(t: Double, pitch: Double, yaw: Double) -> (Gesture, Double)? {
@@ -87,9 +102,11 @@ struct GestureDetector {
         let maxDip = ps.map { abs($0 - p0) }.max() ?? 0
 
         var found: Gesture?
-        if reversals(ps) >= 1, maxDip >= 10, abs(ps.last! - p0) <= 5, yawRange <= 10 {
+        if reversals(ps) >= 1, maxDip >= nodDegrees, abs(ps.last! - p0) <= max(3, nodDegrees * 0.6),
+           yawRange <= max(6, maxDip) {
             found = .nod
-        } else if reversals(ys) >= 2, yawRange >= 16, pitchRange <= 12, abs(ys.last!) <= 8 {
+        } else if reversals(ys) >= 2, yawRange >= shakeDegrees, pitchRange <= max(6, yawRange * 0.75),
+                  abs(ys.last!) <= max(4, shakeDegrees * 0.6) {
             found = .shake
         }
         guard let g = found else { return nil }
@@ -115,6 +132,42 @@ struct GestureDetector {
         }
         return count
     }
+}
+
+// MARK: - Head tilt
+// Tipping your head towards a shoulder and back changes the colour, one step per tilt.
+
+struct TiltDetector {
+    var degrees = 15.0
+    private var baseline: Double?
+    private var tilted = false
+    private var since = 0.0
+    private var cooldownUntil = 0.0
+
+    /// Returns +1 or -1 for a tilt one way or the other, otherwise nil.
+    mutating func feed(t: Double, roll: Double, listening: Bool) -> Int? {
+        guard let b = baseline else { baseline = roll; return nil }
+        let dev = roll - b
+        guard listening else {
+            // Learn how you normally hold your head while nothing is happening
+            baseline = b + dev * 0.05
+            tilted = false; since = 0
+            return nil
+        }
+        if tilted {
+            // Wait until your head is level again before the next tilt can count
+            if abs(dev) < degrees * 0.4 { tilted = false }
+            return nil
+        }
+        if abs(dev) < degrees * 0.4 { baseline = b + dev * 0.02 }
+        guard abs(dev) >= degrees, t >= cooldownUntil else { since = 0; return nil }
+        if since == 0 { since = t; return nil }
+        guard t - since >= 0.12 else { return nil }   // must be held briefly, so a jolt doesn't count
+        tilted = true; since = 0; cooldownUntil = t + 0.6
+        return dev > 0 ? 1 : -1
+    }
+
+    mutating func reset() { baseline = nil; tilted = false; since = 0 }
 }
 
 // MARK: - AirPods volume swipe
@@ -569,6 +622,35 @@ final class LookAndNod: NSObject, ObservableObject, CMHeadphoneMotionManagerDele
     /// Which lights desk mode controls: "all" or a light's name.
     @Published var deskChoice = UserDefaults.standard.string(forKey: "deskChoice") ?? "all" { didSet { UserDefaults.standard.set(deskChoice, forKey: "deskChoice") } }
 
+    /// Each light's current colour as #RRGGBB, so the dashboard can show it.
+    @Published var colours: [String: String] = [:]
+
+    // Sensitivity, changed in the settings panel and remembered.
+    static let defaultNod = 5.0, defaultShake = 8.0, defaultTilt = 15.0, defaultMouseSpeed = 2.0, defaultSwipe = 60.0
+    @Published var nodSize = (UserDefaults.standard.object(forKey: "nodSize") as? Double) ?? LookAndNod.defaultNod {
+        didSet { UserDefaults.standard.set(nodSize, forKey: "nodSize"); applySensitivity() }
+    }
+    @Published var shakeSize = (UserDefaults.standard.object(forKey: "shakeSize") as? Double) ?? LookAndNod.defaultShake {
+        didSet { UserDefaults.standard.set(shakeSize, forKey: "shakeSize"); applySensitivity() }
+    }
+    @Published var tiltSize = (UserDefaults.standard.object(forKey: "tiltSize") as? Double) ?? LookAndNod.defaultTilt {
+        didSet { UserDefaults.standard.set(tiltSize, forKey: "tiltSize"); applySensitivity() }
+    }
+    @Published var tiltEnabled = (UserDefaults.standard.object(forKey: "tiltEnabled") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(tiltEnabled, forKey: "tiltEnabled") }
+    }
+    @Published var flipTilt = UserDefaults.standard.bool(forKey: "flipTilt") {
+        didSet { UserDefaults.standard.set(flipTilt, forKey: "flipTilt") }
+    }
+    @Published var mouseSpeed = (UserDefaults.standard.object(forKey: "mouseSpeed") as? Double) ?? LookAndNod.defaultMouseSpeed {
+        didSet { UserDefaults.standard.set(mouseSpeed, forKey: "mouseSpeed"); applySensitivity() }
+    }
+    @Published var swipeLength = (UserDefaults.standard.object(forKey: "swipeLength") as? Double) ?? LookAndNod.defaultSwipe {
+        didSet { UserDefaults.standard.set(swipeLength, forKey: "swipeLength"); applySensitivity() }
+    }
+    private var tilt = TiltDetector()
+    private var changingColour = false
+
     let tolerance = 22.0                // how close (degrees) you must face a light
     private let bridge = URL(string: "http://127.0.0.1:8765")!
     private let motion = CMHeadphoneMotionManager()
@@ -646,7 +728,14 @@ final class LookAndNod: NSObject, ObservableObject, CMHeadphoneMotionManagerDele
         if held != armed { armed = held; volumeWatcher.arm(held) }
         let on = enabled && (alwaysOn || held)
         if on != listening { listening = on }
+        let roll = m.attitude.roll * 180 / .pi
+        let tiltDirection = tilt.feed(t: m.timestamp, roll: roll, listening: on && tiltEnabled)
         guard on else { detector.reset(); return }
+        if let d = tiltDirection {
+            detector.reset()
+            headTilt(d)
+            return
+        }
         guard let result = detector.feed(t: m.timestamp, pitch: pitch, yaw: yaw) else { return }
         let (gesture, heading) = result
         let action = gesture == .nod ? "on" : "off"
@@ -750,7 +839,7 @@ final class LookAndNod: NSObject, ObservableObject, CMHeadphoneMotionManagerDele
 
     private func startMouse() {
         let m = MouseControl(
-            target: { [weak self] in self?.facing.map { (device: $0.device, label: $0.label) } },
+            target: { [weak self] in self?.controlTarget() },
             report: { [weak self] event in self?.mouseEvent(event) },
             levelChanged: { [weak self] name, level in
                 self?.levels[name] = level
@@ -760,8 +849,86 @@ final class LookAndNod: NSObject, ObservableObject, CMHeadphoneMotionManagerDele
                 if self?.bridgeOnline != ok { self?.bridgeOnline = ok }
             }
         )
+        m.colourSwipe = { [weak self] direction in
+            self?.stepColour(direction, source: "Magic Mouse swipe", symbol: "magicmouse")
+        }
         m.install()
         mouse = m
+        applySensitivity()
+    }
+
+    // MARK: Sensitivity
+
+    func applySensitivity() {
+        detector.nodDegrees = nodSize
+        detector.shakeDegrees = shakeSize
+        tilt.degrees = tiltSize
+        mouse?.pointsPerPercent = 12 / max(1, mouseSpeed)
+        mouse?.swipeDistance = swipeLength
+    }
+
+    func resetSensitivity() {
+        nodSize = Self.defaultNod
+        shakeSize = Self.defaultShake
+        tiltSize = Self.defaultTilt
+        mouseSpeed = Self.defaultMouseSpeed
+        swipeLength = Self.defaultSwipe
+        flipTilt = false
+        tiltEnabled = true
+    }
+
+    // MARK: Colour (head tilt and Magic Mouse swipe)
+
+    /// The light a tilt, scroll or click should change. "all" means every light.
+    func controlTarget() -> (device: String, label: String) {
+        if lookToPick {
+            if let f = facing { return (f.device, f.label) }
+            return ("all", "All lights")
+        }
+        if deskChoice != "all", let d = devices.first(where: { $0.name == deskChoice }) { return (d.name, d.label) }
+        return ("all", "All lights")
+    }
+
+    private func headTilt(_ raw: Int) {
+        let d = flipTilt ? -raw : raw
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+        stepColour(d > 0 ? "next" : "prev", source: d > 0 ? "Tilt right" : "Tilt left", symbol: "airpodspro")
+    }
+
+    func stepColour(_ direction: String, source: String, symbol: String) {
+        guard !changingColour else { return }
+        changingColour = true
+        let (device, label) = controlTarget()
+        let url = bridge.appendingPathComponent(device).appendingPathComponent("preset").appendingPathComponent(direction)
+        Task {
+            defer { changingColour = false }
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                if !bridgeOnline { bridgeOnline = true }
+                guard (response as? HTTPURLResponse)?.statusCode == 200,
+                      let r = try? JSONDecoder().decode(ColourResponse.self, from: data) else {
+                    message = "The bridge needs updating for colours. Restart it with the new bulb_server.py."
+                    return
+                }
+                if let all = r.colours {
+                    for (name, hex) in all { colours[name] = hex; lampOn[name] = true }
+                } else {
+                    if let hex = r.colour { colours[device] = hex }
+                    lampOn[device] = true
+                }
+                let name = r.preset ?? "New colour"
+                message = "\(label): \(name)"
+                HUD.shared.show(HUDInfo(
+                    symbol: "paintpalette.fill",
+                    title: label, detail: name, level: nil,
+                    source: source, sourceSymbol: symbol,
+                    lit: true))
+                log(Activity(symbol: "paintpalette", title: "\(label): \(name)", detail: source, key: "colour-\(label)"))
+            } catch {
+                bridgeOnline = false
+                message = "Can't reach the bulb bridge. Is bulb_server.py running?"
+            }
+        }
     }
 
     private func mouseEvent(_ event: MouseEvent) {
@@ -784,7 +951,8 @@ final class LookAndNod: NSObject, ObservableObject, CMHeadphoneMotionManagerDele
                 lit: true))
             log(Activity(symbol: "paintpalette", title: "\(label): \(name)", detail: "Magic Mouse swipe",
                          key: "mouse-colour-\(label)"))
-        case let .toggled(label, on):
+        case let .toggled(device, label, on):
+            if device == "all" { for d in devices { lampOn[d.name] = on } } else { lampOn[device] = on }
             message = "\(label) \(on ? "on" : "off")."
             HUD.shared.show(HUDInfo(
                 symbol: on ? "lightbulb.max.fill" : "lightbulb.slash",
@@ -909,6 +1077,7 @@ final class LookAndNod: NSObject, ObservableObject, CMHeadphoneMotionManagerDele
                 let (data, _) = try await URLSession.shared.data(from: bridge.appendingPathComponent("devices"))
                 let found = try JSONDecoder().decode(DevicesResponse.self, from: data).devices
                 if found.map(\.name) != devices.map(\.name) { devices = found }
+                for d in found { if let hex = d.colour, colours[d.name] != hex { colours[d.name] = hex } }
                 if !bridgeOnline { bridgeOnline = true }
             } catch {
                 if bridgeOnline { bridgeOnline = false }
@@ -1152,6 +1321,7 @@ private struct RoomPlan: View {
         let lampOn = app.lampOn
         let levels = app.levels
         let look = app.lookToPick
+        let colours = app.colours
         let tol = app.tolerance
         let accent = Color.accentColor
         let ink = Color.primary
@@ -1168,7 +1338,7 @@ private struct RoomPlan: View {
                         let lv = Double(levels[t.device] ?? 100) / 100
                         let gr = r * (0.5 + 0.3 * lv)
                         ctx.fill(Path(ellipseIn: CGRect(x: p.x - gr, y: p.y - gr, width: gr * 2, height: gr * 2)),
-                                 with: .radialGradient(Gradient(colors: [lampColor.opacity(0.18 + 0.4 * lv), lampColor.opacity(0)]),
+                                 with: .radialGradient(Gradient(colors: [lampTint(colours[t.device]).opacity(0.18 + 0.4 * lv), lampTint(colours[t.device]).opacity(0)]),
                                                        center: p, startRadius: 0, endRadius: gr))
                     }
                     for k in [0.42, 0.72, 1.0] {
@@ -1231,6 +1401,7 @@ private struct RoomPlan: View {
         }
         .animation(.spring(duration: 0.3), value: app.flash)
         .animation(.easeInOut(duration: 0.45), value: app.lampOn)
+        .animation(.easeInOut(duration: 0.45), value: app.colours)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Room. Facing \(Int(yaw.rounded())) degrees.")
     }
@@ -1242,6 +1413,7 @@ private struct LampMarker: View {
 
     var body: some View {
         let on = app.lampOn[target.device] == true
+        let lampColor = lampTint(app.colours[target.device])
         let active = app.lookToPick ? app.facing?.device == target.device : app.deskLights.contains { $0.name == target.device }
         return VStack(spacing: 6) {
             ZStack {
@@ -1439,6 +1611,7 @@ private struct Pipeline: View {
 
 struct ContentView: View {
     @StateObject private var app = LookAndNod()
+    @State private var showSettings = false
 
     private var setupDone: Bool {
         app.airpodsConnected && app.bridgeOnline && app.hasRecentred && !app.targets.isEmpty
@@ -1499,16 +1672,12 @@ struct ContentView: View {
             .padding(.horizontal, 16).padding(.vertical, 9)
             .background(.regularMaterial, in: Capsule())
             .overlay(Capsule().strokeBorder(Color.white.opacity(0.14)))
-            Menu {
-                Toggle("Gestures", isOn: $app.enabled)
-                Toggle("On Screen Pop Ups", isOn: $app.showPopUps)
-            } label: {
+            Button { showSettings.toggle() } label: {
                 Image(systemName: "slider.horizontal.3")
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Gestures and pop ups")
+            .buttonStyle(.borderless)
+            .help("Settings and sensitivity")
+            .popover(isPresented: $showSettings, arrowEdge: .bottom) { SettingsPanel(app: app) }
             Button { app.recentre() } label: { Label("Recentre", systemImage: "scope") }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
@@ -1671,6 +1840,7 @@ struct ContentView: View {
 
     private func lightRow(_ d: BridgeDevice) -> some View {
         let on = app.lampOn[d.name] == true
+        let lampColor = lampTint(app.colours[d.name])
         let saved = app.targets.first { $0.device == d.name }
         let active = app.lookToPick ? app.facing?.device == d.name : app.deskLights.contains { $0.name == d.name }
         let subtitle: String = {
@@ -1775,5 +1945,60 @@ struct ContentView: View {
         .padding(16)
         .frame(height: 260, alignment: .top)
         .glassCard()
+    }
+}
+
+// MARK: - Settings panel
+
+private struct SettingsPanel: View {
+    @ObservedObject var app: LookAndNod
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Settings").font(.headline)
+            Toggle("Gestures", isOn: $app.enabled)
+            Toggle("On screen pop ups", isOn: $app.showPopUps)
+
+            Divider()
+            Text("Head gestures").font(.subheadline.weight(.semibold))
+            slider("Nod size", $app.nodSize, 3...15, step: 1, unit: "°",
+                   hint: "How far your head must dip. Smaller means a smaller nod counts.")
+            slider("Shake size", $app.shakeSize, 4...25, step: 1, unit: "°",
+                   hint: "How wide a shake must be. Smaller means a smaller shake counts.")
+            Toggle("Tilt head to change colour", isOn: $app.tiltEnabled)
+            if app.tiltEnabled {
+                slider("Tilt size", $app.tiltSize, 8...30, step: 1, unit: "°",
+                       hint: "How far to tip your head towards a shoulder.")
+                Toggle("Swap tilt direction", isOn: $app.flipTilt)
+            }
+
+            Divider()
+            Text("Magic Mouse").font(.subheadline.weight(.semibold))
+            slider("Brightness speed", $app.mouseSpeed, 1...6, step: 0.5, unit: "×",
+                   hint: "How fast sliding a finger changes brightness.")
+            slider("Swipe length", $app.swipeLength, 30...120, step: 5, unit: "",
+                   hint: "How far to swipe sideways to change colour.")
+
+            Divider()
+            Button("Reset to defaults") { app.resetSensitivity() }
+        }
+        .padding(18)
+        .frame(width: 320)
+    }
+
+    private func slider(_ title: String, _ value: Binding<Double>, _ range: ClosedRange<Double>,
+                        step: Double, unit: String, hint: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(step < 1 ? String(format: "%.1f%@", value.wrappedValue, unit)
+                              : String(format: "%.0f%@", value.wrappedValue, unit))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            Slider(value: value, in: range, step: step)
+            Text(hint).font(.caption).foregroundStyle(.secondary)
+        }
     }
 }
